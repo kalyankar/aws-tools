@@ -1,0 +1,4 @@
+account_id,role_arn,role_session_name
+123456789012,arn:aws:iam::123456789012:role/CrossAccountRole,S3HttpDenySession
+987654321098,arn:aws:iam::987654321098:role/CrossAccountRole,S3HttpDenySession
+555666777888,arn:aws:iam::555666777888:role/CrossAccountRole,S3HttpDenySession
