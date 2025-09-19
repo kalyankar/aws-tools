@@ -1,0 +1,4 @@
+target_account_id,target_role_arn,target_role_session_name
+123456789012,arn:aws:iam::123456789012:role/CrossAccountRole,TargetSession1
+987654321098,arn:aws:iam::987654321098:role/CrossAccountRole,TargetSession2
+555555555555,arn:aws:iam::555555555555:role/CrossAccountRole,TargetSession3

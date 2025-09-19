@@ -1,0 +1,4 @@
+shared_account_id,shared_role_arn,shared_role_session_name,target_account_id,target_role_arn,target_role_session_name
+111111111111,arn:aws:iam::111111111111:role/SharedAccessRole,SharedSession,123456789012,arn:aws:iam::123456789012:role/CrossAccountRole,TargetSession1
+111111111111,arn:aws:iam::111111111111:role/SharedAccessRole,SharedSession,987654321098,arn:aws:iam::987654321098:role/CrossAccountRole,TargetSession2
+111111111111,arn:aws:iam::111111111111:role/SharedAccessRole,SharedSession,555555555555,arn:aws:iam::555555555555:role/CrossAccountRole,TargetSession3

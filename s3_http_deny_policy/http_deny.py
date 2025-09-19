@@ -1,7 +1,8 @@
 #!/usr/bin/env python3
 """
 Script to deny HTTP requests on S3 buckets across multiple AWS accounts using CSV input.
-Reads account information from a CSV file, assumes roles, and updates S3 bucket policies.
+Authenticates directly to a shared account using environment variables and assumes the same role in all target accounts.
+Reads target account information from a CSV file, assumes roles, and updates S3 bucket policies.
 """
 
 import boto3
@@ -111,21 +112,21 @@ def create_aws_session(region: str) -> boto3.Session:
 
 def read_csv_accounts(csv_file_path: str, dry_run: bool) -> List[Dict[str, str]]:
     """
-    Read account information from CSV file.
+    Read target account information from CSV file.
     
     Expected CSV format:
-    account_id,role_arn,role_session_name
-    123456789012,arn:aws:iam::123456789012:role/CrossAccountRole,MySession
-    987654321098,arn:aws:iam::987654321098:role/CrossAccountRole,MySession
+    target_account_id,target_role_arn,target_role_session_name
+    123456789012,arn:aws:iam::123456789012:role/CrossAccountRole,TargetSession1
+    987654321098,arn:aws:iam::987654321098:role/CrossAccountRole,TargetSession2
     
     Args:
         csv_file_path (str): Path to the CSV file
         dry_run (bool): Whether this is a dry run
         
     Returns:
-        List[Dict[str, str]]: List of account information dictionaries
+        List[Dict[str, str]]: List of target account information dictionaries
     """
-    accounts = []
+    target_accounts = []
     
     try:
         LOGGER.info(f"Reading CSV file: {csv_file_path}")
@@ -143,7 +144,7 @@ def read_csv_accounts(csv_file_path: str, dry_run: bool) -> List[Dict[str, str]]
             reader = csv.DictReader(csvfile, delimiter=delimiter)
             
             # Validate required columns
-            required_columns = ['account_id', 'role_arn']
+            required_columns = ['target_account_id', 'target_role_arn']
             if not all(col in reader.fieldnames for col in required_columns):
                 raise ValueError(f"CSV must contain columns: {required_columns}. Found: {reader.fieldnames}")
             
@@ -153,27 +154,28 @@ def read_csv_accounts(csv_file_path: str, dry_run: bool) -> List[Dict[str, str]]
                     continue
                 
                 # Validate required fields
-                if not row.get('account_id') or not row.get('role_arn'):
+                if not row.get('target_account_id') or not row.get('target_role_arn'):
                     LOGGER.warning(f"Skipping row {row_num}: Missing required fields")
                     continue
                 
-                # Set default role session name if not provided
-                if not row.get('role_session_name'):
-                    row['role_session_name'] = f"S3HttpDenySession_{datetime.now().strftime('%Y%m%d_%H%M%S')}"
+                # Set default session name if not provided
+                if not row.get('target_role_session_name'):
+                    row['target_role_session_name'] = f"TargetSession_{datetime.now().strftime('%Y%m%d_%H%M%S')}"
                 
-                accounts.append({
-                    'account_id': row['account_id'].strip(),
-                    'role_arn': row['role_arn'].strip(),
-                    'role_session_name': row['role_session_name'].strip()
+                # Add target account info
+                target_accounts.append({
+                    'account_id': row['target_account_id'].strip(),
+                    'role_arn': row['target_role_arn'].strip(),
+                    'role_session_name': row['target_role_session_name'].strip()
                 })
         
-        LOGGER.info(f"Successfully read {len(accounts)} accounts from CSV file")
+        LOGGER.info(f"Successfully read {len(target_accounts)} target accounts from CSV file")
         if dry_run:
-            print(f"[DRY RUN] Read {len(accounts)} accounts from CSV file")
+            print(f"[DRY RUN] Read {len(target_accounts)} target accounts from CSV file")
         else:
-            print(f"Read {len(accounts)} accounts from CSV file")
+            print(f"Read {len(target_accounts)} target accounts from CSV file")
         
-        return accounts
+        return target_accounts
         
     except Exception as e:
         LOGGER.error(f"Error reading CSV file: {e}")
@@ -181,7 +183,7 @@ def read_csv_accounts(csv_file_path: str, dry_run: bool) -> List[Dict[str, str]]
         raise
 
 
-def assume_role(session: boto3.Session, role_arn: str, role_session_name: str, region: str, dry_run: bool) -> Optional[boto3.Session]:
+def assume_role(session: boto3.Session, role_arn: str, role_session_name: str, region: str, dry_run: bool, external_id: str = None) -> Optional[boto3.Session]:
     """
     Assume a role and return a new session.
     
@@ -191,6 +193,7 @@ def assume_role(session: boto3.Session, role_arn: str, role_session_name: str, r
         role_session_name (str): Name for the role session
         region (str): AWS region
         dry_run (bool): Whether this is a dry run
+        external_id (str): Optional external ID for role assumption
         
     Returns:
         Optional[boto3.Session]: New session with assumed role credentials, or None if failed
@@ -205,12 +208,19 @@ def assume_role(session: boto3.Session, role_arn: str, role_session_name: str, r
         # Get STS client from base session
         sts_client = session.client('sts')
         
+        # Prepare assume role parameters
+        assume_role_params = {
+            'RoleArn': role_arn,
+            'RoleSessionName': role_session_name,
+            'DurationSeconds': 3600  # 1 hour
+        }
+        
+        # Add external ID if provided
+        if external_id:
+            assume_role_params['ExternalId'] = external_id
+        
         # Assume the role
-        response = sts_client.assume_role(
-            RoleArn=role_arn,
-            RoleSessionName=role_session_name,
-            DurationSeconds=3600  # 1 hour
-        )
+        response = sts_client.assume_role(**assume_role_params)
         
         # Create new session with assumed role credentials
         assumed_session = boto3.Session(
@@ -461,35 +471,35 @@ def update_bucket_policy_deny_http(s3_client, bucket_name: str, account_id: str,
         return False
 
 
-def process_account(session: boto3.Session, account_info: Dict[str, str], region: str, dry_run: bool) -> Dict[str, Any]:
+def process_account(shared_session: boto3.Session, target_account_info: Dict[str, str], region: str, dry_run: bool) -> Dict[str, Any]:
     """
-    Process a single account to update S3 bucket policies.
+    Process a single target account to update S3 bucket policies.
     
     Args:
-        session (boto3.Session): Base AWS session
-        account_info (Dict[str, str]): Account information from CSV
+        shared_session (boto3.Session): Session authenticated to shared account
+        target_account_info (Dict[str, str]): Target account information from CSV
         region (str): AWS region
         dry_run (bool): Whether this is a dry run
         
     Returns:
         Dict[str, Any]: Results of processing the account
     """
-    account_id = account_info['account_id']
-    role_arn = account_info['role_arn']
-    role_session_name = account_info['role_session_name']
+    account_id = target_account_info['account_id']
+    role_arn = target_account_info['role_arn']
+    role_session_name = target_account_info['role_session_name']
     
-    LOGGER.info(f"Starting processing for account: {account_id}")
+    LOGGER.info(f"Starting processing for target account: {account_id}")
     
     if dry_run:
-        print(f"\n[DRY RUN] Processing account: {account_id}")
-        print(f"[DRY RUN] Role ARN: {role_arn}")
+        print(f"\n[DRY RUN] Processing target account: {account_id}")
+        print(f"[DRY RUN] Target Role ARN: {role_arn}")
     else:
-        print(f"\nProcessing account: {account_id}")
-        print(f"Role ARN: {role_arn}")
+        print(f"\nProcessing target account: {account_id}")
+        print(f"Target Role ARN: {role_arn}")
     
     try:
-        # Assume role
-        assumed_session = assume_role(session, role_arn, role_session_name, region, dry_run)
+        # Assume target account role from shared account session
+        assumed_session = assume_role(shared_session, role_arn, role_session_name, region, dry_run)
         
         if not assumed_session and not dry_run:
             return {
@@ -555,9 +565,10 @@ def process_account(session: boto3.Session, account_info: Dict[str, str], region
 def run_script(csv_file_path: str, region: str, dry_run: bool) -> None:
     """
     Main execution function to process accounts from CSV and update S3 bucket policies.
+    Authenticates directly to shared account using environment variables, then assumes roles in target accounts.
     
     Args:
-        csv_file_path (str): Path to the CSV file containing account information
+        csv_file_path (str): Path to the CSV file containing target account information
         region (str): AWS region
         dry_run (bool): Whether this is a dry run
     """
@@ -571,37 +582,51 @@ def run_script(csv_file_path: str, region: str, dry_run: bool) -> None:
         print("=" * 50)
     
     try:
-        # Read accounts from CSV
+        # Read target accounts from CSV
         if dry_run:
-            print("[DRY RUN] Reading accounts from CSV file...")
+            print("[DRY RUN] Reading target accounts from CSV file...")
         else:
-            print("Reading accounts from CSV file...")
+            print("Reading target accounts from CSV file...")
             print(f"Policy backups will be saved to: {BACKUP_DIR}")
         
-        accounts = read_csv_accounts(csv_file_path, dry_run)
+        target_accounts = read_csv_accounts(csv_file_path, dry_run)
         
-        if not accounts:
-            LOGGER.warning("No accounts found in CSV file")
+        if not target_accounts:
+            LOGGER.warning("No target accounts found in CSV file")
             if dry_run:
-                print("[DRY RUN] No accounts found in CSV file.")
+                print("[DRY RUN] No target accounts found in CSV file.")
             else:
-                print("No accounts found in CSV file.")
+                print("No target accounts found in CSV file.")
             return
         
-        LOGGER.info(f"Found {len(accounts)} accounts to process")
+        LOGGER.info(f"Found {len(target_accounts)} target accounts to process")
         if dry_run:
-            print(f"[DRY RUN] Found {len(accounts)} accounts to process")
+            print(f"[DRY RUN] Found {len(target_accounts)} target accounts to process")
         else:
-            print(f"Found {len(accounts)} accounts to process")
+            print(f"Found {len(target_accounts)} target accounts to process")
         
-        # Create AWS session
-        session = create_aws_session(region)
+        # Create AWS session authenticated to shared account using environment variables
+        shared_session = create_aws_session(region)
         
-        # Process each account
+        # Verify we're authenticated to the shared account
+        try:
+            sts_client = shared_session.client('sts')
+            identity = sts_client.get_caller_identity()
+            LOGGER.info(f"Authenticated to shared account: {identity['Account']}")
+            if dry_run:
+                print(f"[DRY RUN] Authenticated to shared account: {identity['Account']}")
+            else:
+                print(f"✓ Authenticated to shared account: {identity['Account']}")
+        except Exception as e:
+            LOGGER.error(f"Failed to verify shared account authentication: {e}")
+            print(f"✗ Failed to verify shared account authentication: {e}")
+            return
+        
+        # Process each target account
         results = []
-        for i, account_info in enumerate(accounts, 1):
-            LOGGER.info(f"Processing account {i}/{len(accounts)}: {account_info['account_id']}")
-            result = process_account(session, account_info, region, dry_run)
+        for i, target_account_info in enumerate(target_accounts, 1):
+            LOGGER.info(f"Processing target account {i}/{len(target_accounts)}: {target_account_info['account_id']}")
+            result = process_account(shared_session, target_account_info, region, dry_run)
             results.append(result)
         
         # Print summary
@@ -666,11 +691,11 @@ def run_script(csv_file_path: str, region: str, dry_run: bool) -> None:
 def main():
     """Main function to parse arguments and run the script."""
     parser = argparse.ArgumentParser(
-        description='Update S3 bucket policies to deny HTTP requests across multiple AWS accounts using CSV input'
+        description='Update S3 bucket policies to deny HTTP requests across multiple AWS accounts using CSV input. Authenticates directly to shared account using environment variables and assumes cross-account roles.'
     )
     parser.add_argument(
         'csv_file',
-        help='Path to CSV file containing account information (account_id,role_arn,role_session_name)'
+        help='Path to CSV file containing target account information (target_account_id,target_role_arn,target_role_session_name)'
     )
     parser.add_argument(
         '--region',

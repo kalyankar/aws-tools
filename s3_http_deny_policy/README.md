@@ -1,6 +1,6 @@
 # S3 HTTP Deny Policy Script with CSV Input
 
-This script reads AWS account information from a CSV file, assumes roles in each account, and updates S3 bucket policies to deny HTTP requests (enforce HTTPS only).
+This script authenticates directly to a shared AWS account using environment variables, assumes cross-account roles to access target accounts, and updates S3 bucket policies to deny HTTP requests (enforce HTTPS only).
 
 ## Features
 
@@ -14,13 +14,15 @@ This script reads AWS account information from a CSV file, assumes roles in each
 
 ## Prerequisites
 
-1. **AWS Credentials**: Configure AWS credentials with permissions to assume roles
-2. **Cross-Account Roles**: Each target account must have a role that can be assumed
-3. **Required Permissions**: The assumed roles must have:
-   - `s3:ListBucket` - to list S3 buckets
-   - `s3:GetBucketPolicy` - to read bucket policies
-   - `s3:PutBucketPolicy` - to update bucket policies
-   - `sts:AssumeRole` - to assume roles (for the base credentials)
+1. **AWS Credentials**: Configure AWS credentials for the shared account using environment variables
+2. **Shared Account Access**: Direct access to the shared account (no role assumption needed)
+3. **Cross-Account Roles**: Each target account must have a role that can be assumed by the shared account
+4. **Required Permissions**: 
+   - **Shared account credentials**: `sts:AssumeRole` to assume target account roles
+   - **Target account roles**: 
+     - `s3:ListBucket` - to list S3 buckets
+     - `s3:GetBucketPolicy` - to read bucket policies
+     - `s3:PutBucketPolicy` - to update bucket policies
 
 ## Installation
 
@@ -29,12 +31,14 @@ This script reads AWS account information from a CSV file, assumes roles in each
 pip install -r requirements.txt
 ```
 
-2. Ensure AWS credentials are configured:
+2. Ensure AWS credentials are configured for the shared account:
 ```bash
-aws configure
-# OR set environment variables:
-export AWS_ACCESS_KEY_ID=your_access_key
-export AWS_SECRET_ACCESS_KEY=your_secret_key
+# Set environment variables for shared account:
+export AWS_ACCESS_KEY_ID=your_shared_account_access_key
+export AWS_SECRET_ACCESS_KEY=your_shared_account_secret_key
+export AWS_SESSION_TOKEN=your_session_token  # Optional, for temporary credentials
+# OR use AWS CLI:
+aws configure --profile shared-account
 ```
 
 ## CSV File Format
@@ -43,17 +47,17 @@ Create a CSV file with the following columns:
 
 | Column | Required | Description |
 |--------|----------|-------------|
-| `account_id` | Yes | AWS Account ID (12 digits) |
-| `role_arn` | Yes | ARN of the role to assume in the target account |
-| `role_session_name` | No | Name for the role session (defaults to timestamped name) |
+| `target_account_id` | Yes | AWS Account ID of the target account (12 digits) |
+| `target_role_arn` | Yes | ARN of the role to assume in the target account |
+| `target_role_session_name` | No | Name for the target account role session (defaults to timestamped name) |
 
 ### Example CSV File (`accounts.csv`):
 
 ```csv
-account_id,role_arn,role_session_name
-123456789012,arn:aws:iam::123456789012:role/CrossAccountRole,S3HttpDenySession
-987654321098,arn:aws:iam::987654321098:role/CrossAccountRole,S3HttpDenySession
-555666777888,arn:aws:iam::555666777888:role/CrossAccountRole,S3HttpDenySession
+target_account_id,target_role_arn,target_role_session_name
+123456789012,arn:aws:iam::123456789012:role/CrossAccountRole,TargetSession1
+987654321098,arn:aws:iam::987654321098:role/CrossAccountRole,TargetSession2
+555666777888,arn:aws:iam::555666777888:role/CrossAccountRole,TargetSession3
 ```
 
 ## Usage
@@ -90,13 +94,14 @@ python httpDeny_all_accounts.py accounts.csv --region us-east-1 --dry-run
 
 ## What the Script Does
 
-1. **Reads CSV**: Parses the CSV file to get account information
-2. **Assumes Roles**: For each account, assumes the specified role
-3. **Lists Buckets**: Gets all S3 buckets in the account
-4. **Checks Policies**: Examines existing bucket policies
-5. **Backs Up Policies**: Saves current policies to backup files
-6. **Updates Policies**: Adds HTTP deny statements to bucket policies
-7. **Logs Activities**: Records all actions and results
+1. **Reads CSV**: Parses the CSV file to get target account information
+2. **Authenticates to Shared Account**: Uses environment variables to authenticate directly to the shared account
+3. **Assumes Target Roles**: For each target account, assumes the specified role from the shared account
+4. **Lists Buckets**: Gets all S3 buckets in each target account
+5. **Checks Policies**: Examines existing bucket policies
+6. **Backs Up Policies**: Saves current policies to backup files
+7. **Updates Policies**: Adds HTTP deny statements to bucket policies
+8. **Logs Activities**: Records all actions and results
 
 ## S3 Policy Statement Added
 
@@ -143,12 +148,14 @@ The script adds the following policy statement to deny HTTP requests:
 ```
 Starting S3 HTTP Deny Policy Update
 ==================================================
-Reading accounts from CSV file...
-Read 3 accounts from CSV file
+Reading target accounts from CSV file...
+Read 3 target accounts from CSV file
 Policy backups will be saved to: s3_policy_backups_20241201_143022
+Found 3 target accounts to process
+✓ Authenticated to shared account: 111111111111
 
-Processing account: 123456789012
-Role ARN: arn:aws:iam::123456789012:role/CrossAccountRole
+Processing target account: 123456789012
+Target Role ARN: arn:aws:iam::123456789012:role/CrossAccountRole
 ✓ Successfully assumed role in account: 123456789012
 Found 5 S3 buckets in account 123456789012
 ✓ Retrieved policy for my-bucket-1
@@ -187,22 +194,27 @@ The script handles various error scenarios:
 
 ### Common Issues
 
-1. **"Access Denied" when assuming role**
-   - Check role ARN format
-   - Verify trust policy allows your principal
-   - Ensure you have `sts:AssumeRole` permission
+1. **"Access Denied" when authenticating to shared account**
+   - Check AWS credentials are set correctly in environment variables
+   - Verify credentials have access to the shared account
+   - Ensure credentials are not expired
 
-2. **"No such bucket policy" errors**
+2. **"Access Denied" when assuming target account role**
+   - Check target account role ARN format
+   - Verify trust policy allows the shared account to assume it
+   - Ensure the shared account has `sts:AssumeRole` permission
+
+3. **"No such bucket policy" errors**
    - This is normal for buckets without existing policies
    - The script will create a new policy
 
-3. **CSV parsing errors**
+4. **CSV parsing errors**
    - Check CSV format and encoding
-   - Ensure required columns are present
+   - Ensure required columns are present (target_account_id, target_role_arn)
    - Verify no empty rows with missing data
 
-4. **Permission errors on S3 operations**
-   - Verify assumed role has required S3 permissions
+5. **Permission errors on S3 operations**
+   - Verify target account role has required S3 permissions
    - Check bucket policies don't deny access
 
 ### Debug Mode
