@@ -17,10 +17,23 @@ from botocore.exceptions import ClientError, NoCredentialsError
 from typing import List, Dict, Any, Optional
 
 # Global variables for configuration
-REGION = 'us-east-1'
+REGION = 'us-west-2'
 DRY_RUN = False
 BACKUP_DIR = ""
 LOGGER = None
+
+
+def safe_log(level: str, message: str):
+    """Safely log a message, handling cases where LOGGER might be None."""
+    if LOGGER:
+        if level == 'info':
+            LOGGER.info(message)
+        elif level == 'warning':
+            LOGGER.warning(message)
+        elif level == 'error':
+            LOGGER.error(message)
+        elif level == 'debug':
+            LOGGER.debug(message)
 
 
 def setup_logging(region: str, dry_run: bool) -> str:
@@ -129,7 +142,7 @@ def read_csv_accounts(csv_file_path: str, dry_run: bool) -> List[Dict[str, str]]
     target_accounts = []
     
     try:
-        LOGGER.info(f"Reading CSV file: {csv_file_path}")
+        safe_log('info', f"Reading CSV file: {csv_file_path}")
         
         if not os.path.exists(csv_file_path):
             raise FileNotFoundError(f"CSV file not found: {csv_file_path}")
@@ -155,7 +168,7 @@ def read_csv_accounts(csv_file_path: str, dry_run: bool) -> List[Dict[str, str]]
                 
                 # Validate required fields
                 if not row.get('target_account_id') or not row.get('target_role_arn'):
-                    LOGGER.warning(f"Skipping row {row_num}: Missing required fields")
+                    safe_log('warning', f"Skipping row {row_num}: Missing required fields")
                     continue
                 
                 # Set default session name if not provided
@@ -169,7 +182,7 @@ def read_csv_accounts(csv_file_path: str, dry_run: bool) -> List[Dict[str, str]]
                     'role_session_name': row['target_role_session_name'].strip()
                 })
         
-        LOGGER.info(f"Successfully read {len(target_accounts)} target accounts from CSV file")
+        safe_log('info', f"Successfully read {len(target_accounts)} target accounts from CSV file")
         if dry_run:
             print(f"[DRY RUN] Read {len(target_accounts)} target accounts from CSV file")
         else:
@@ -178,7 +191,7 @@ def read_csv_accounts(csv_file_path: str, dry_run: bool) -> List[Dict[str, str]]
         return target_accounts
         
     except Exception as e:
-        LOGGER.error(f"Error reading CSV file: {e}")
+        safe_log('error', f"Error reading CSV file: {e}")
         print(f"Error reading CSV file: {e}")
         raise
 
@@ -202,8 +215,7 @@ def assume_role(session: boto3.Session, role_arn: str, role_session_name: str, r
         LOGGER.info(f"Assuming role: {role_arn}")
         
         if dry_run:
-            print(f"[DRY RUN] Would assume role: {role_arn}")
-            return None
+            print(f"[DRY RUN] Assuming role: {role_arn}")
         
         # Get STS client from base session
         sts_client = session.client('sts')
@@ -266,15 +278,17 @@ def get_s3_buckets(s3_client, dry_run: bool) -> List[str]:
         if dry_run:
             print(f"[DRY RUN] Listing S3 buckets")
         
+        if not s3_client:
+            LOGGER.error("S3 client is None")
+            print("Error: S3 client is None")
+            return []
+        
         response = s3_client.list_buckets()
         buckets = [bucket['Name'] for bucket in response['Buckets']]
         
         LOGGER.info(f"Found {len(buckets)} S3 buckets")
         for bucket in buckets:
             LOGGER.debug(f"Found bucket: {bucket}")
-        
-        if dry_run:
-            print(f"[DRY RUN] Found {len(buckets)} S3 buckets")
         
         return buckets
     except ClientError as e:
@@ -300,6 +314,11 @@ def get_bucket_policy(s3_client, bucket_name: str, dry_run: bool) -> Dict[str, A
         
         if dry_run:
             print(f"[DRY RUN] Getting bucket policy for: {bucket_name}")
+        
+        if not s3_client:
+            LOGGER.error("S3 client is None")
+            print("Error: S3 client is None")
+            return {}
         
         response = s3_client.get_bucket_policy(Bucket=bucket_name)
         policy = json.loads(response['Policy'])
@@ -424,8 +443,7 @@ def update_bucket_policy_deny_http(s3_client, bucket_name: str, account_id: str,
         # Check if HTTP deny statement already exists
         existing_deny = False
         for statement in current_policy.get('Statement', []):
-            if (statement.get('Sid') == 'DenyHttpRequests' and 
-                statement.get('Effect') == 'Deny' and
+            if (statement.get('Effect') == 'Deny' and
                 'Condition' in statement and
                 'StringEquals' in statement['Condition'] and
                 statement['Condition']['StringEquals'].get('aws:SecureTransport') == 'false'):
@@ -451,14 +469,24 @@ def update_bucket_policy_deny_http(s3_client, bucket_name: str, account_id: str,
             
             LOGGER.info(f"Adding HTTP deny statement to bucket policy: {bucket_name}")
             
-            # Update bucket policy
-            s3_client.put_bucket_policy(
-                Bucket=bucket_name,
-                Policy=json.dumps(current_policy, indent=2)
-            )
+            # Update bucket policy (skip in dry run)
+            if not dry_run:
+                if not s3_client:
+                    LOGGER.error("S3 client is None")
+                    print("Error: S3 client is None")
+                    return False
+                
+                s3_client.put_bucket_policy(
+                    Bucket=bucket_name,
+                    Policy=json.dumps(current_policy, indent=2)
+                )
+                
+                LOGGER.info(f"Successfully updated bucket policy for {bucket_name}")
+                print(f"✓ Updated bucket policy for {bucket_name} to deny HTTP requests")
+            else:
+                LOGGER.info(f"[DRY RUN] Would update bucket policy for {bucket_name}")
+                print(f"[DRY RUN] ✓ Would update bucket policy for {bucket_name} to deny HTTP requests")
             
-            LOGGER.info(f"Successfully updated bucket policy for {bucket_name}")
-            print(f"✓ Updated bucket policy for {bucket_name} to deny HTTP requests")
             return True
         else:
             LOGGER.info(f"Bucket {bucket_name} already has HTTP deny policy")
@@ -511,18 +539,21 @@ def process_account(shared_session: boto3.Session, target_account_info: Dict[str
             }
         
         # Create S3 client with assumed role session
-        if dry_run:
-            s3_client = None  # Will be handled in dry run mode
-        else:
-            s3_client = assumed_session.client('s3')
+        if not assumed_session:
+            return {
+                'account_id': account_id,
+                'error': 'Failed to assume role',
+                'total_buckets': 0,
+                'success_count': 0,
+                'failed_buckets': []
+            }
+        s3_client = assumed_session.client('s3')
         
-        # Get S3 buckets
+        # Get S3 buckets (always perform actual listing, even in dry run)
+        buckets = get_s3_buckets(s3_client, dry_run)
         if dry_run:
-            # For dry run, simulate bucket listing
-            buckets = ['example-bucket-1', 'example-bucket-2']  # Simulated buckets
             print(f"[DRY RUN] Found {len(buckets)} S3 buckets in account {account_id}")
         else:
-            buckets = get_s3_buckets(s3_client, dry_run)
             print(f"Found {len(buckets)} S3 buckets in account {account_id}")
         
         # Update bucket policies
@@ -533,10 +564,16 @@ def process_account(shared_session: boto3.Session, target_account_info: Dict[str
             LOGGER.info(f"Processing bucket: {bucket} in account: {account_id}")
             if update_bucket_policy_deny_http(s3_client, bucket, account_id, dry_run):
                 success_count += 1
-                LOGGER.info(f"Successfully processed bucket: {bucket}")
+                if dry_run:
+                    LOGGER.info(f"[DRY RUN] Would successfully process bucket: {bucket}")
+                else:
+                    LOGGER.info(f"Successfully processed bucket: {bucket}")
             else:
                 failed_buckets.append(bucket)
-                LOGGER.error(f"Failed to process bucket: {bucket}")
+                if dry_run:
+                    LOGGER.error(f"[DRY RUN] Would fail to process bucket: {bucket}")
+                else:
+                    LOGGER.error(f"Failed to process bucket: {bucket}")
         
         LOGGER.info(f"Completed processing account {account_id}. Success: {success_count}, Failed: {len(failed_buckets)}")
         
@@ -620,6 +657,7 @@ def run_script(csv_file_path: str, region: str, dry_run: bool) -> None:
         except Exception as e:
             LOGGER.error(f"Failed to verify shared account authentication: {e}")
             print(f"✗ Failed to verify shared account authentication: {e}")
+            print("Please check your AWS credentials and ensure they have access to the shared account.")
             return
         
         # Process each target account

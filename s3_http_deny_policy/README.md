@@ -9,7 +9,7 @@ This script authenticates directly to a shared AWS account using environment var
 - **S3 Policy Management**: Checks and updates S3 bucket policies to deny HTTP requests
 - **Comprehensive Logging**: Logs all activities with timestamps
 - **Policy Backup**: Automatically backs up existing policies before modification
-- **Dry Run Mode**: Preview all actions without making actual changes
+- **Dry Run Mode**: Perform all AWS operations (authentication, role assumption, bucket listing, policy retrieval) but skip policy updates
 - **Error Handling**: Robust error handling with detailed reporting
 
 ## Prerequisites
@@ -77,20 +77,22 @@ python httpDeny_all_accounts.py accounts.csv --region us-west-2
 ### Dry Run Mode (Recommended First)
 
 ```bash
-python httpDeny_all_accounts.py accounts.csv --dry-run
+python http_deny.py accounts.csv --dry-run
 ```
+
+**Note**: Dry run mode performs all AWS operations (authentication, role assumption, bucket listing, policy retrieval) but skips the actual policy updates. This gives you a realistic preview of what the script will do.
 
 ### Full Command with Options
 
 ```bash
-python httpDeny_all_accounts.py accounts.csv --region us-east-1 --dry-run
+python http_deny.py accounts.csv --region us-east-1 --dry-run
 ```
 
 ## Command Line Arguments
 
 - `csv_file` (required): Path to CSV file containing account information
 - `--region`: AWS region (default: us-east-1)
-- `--dry-run`: Preview actions without making changes
+- `--dry-run`: Perform all AWS operations except policy updates
 
 ## What the Script Does
 
@@ -227,7 +229,7 @@ logging.basicConfig(level=logging.DEBUG, ...)
 
 ## Best Practices
 
-1. **Test First**: Always run with `--dry-run` first
+1. **Test First**: Always run with `--dry-run` first (performs all operations except policy updates)
 2. **Backup Review**: Review policy backups before making changes
 3. **Staged Rollout**: Test on a few accounts before full deployment
 4. **Monitor Logs**: Watch for errors and unexpected behavior
